@@ -18,12 +18,21 @@ const MIME = {
 };
 
 const httpServer = http.createServer((req, res) => {
-  let filePath = path.join(DIST, req.url === '/' ? 'index.html' : req.url);
-  const ext = path.extname(filePath);
+  const urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+  const safePath = path.normalize(urlPath).replace(/^(\.\.(\/|\\|$))+/, '');
+  const filePath = path.join(DIST, safePath === '/' || safePath === '\\' ? 'index.html' : safePath);
+  const ext = path.extname(filePath).toLowerCase();
 
   fs.readFile(filePath, (err, data) => {
     if (err) {
-      // SPA fallback
+      // Only fall back to index.html for SPA routes (no file extension).
+      // Requests for .js/.css/etc. must return 404, not HTML — otherwise the
+      // browser gets text/html where it expects a module and blocks it.
+      if (ext) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found');
+        return;
+      }
       fs.readFile(path.join(DIST, 'index.html'), (err2, html) => {
         if (err2) { res.writeHead(404); res.end('Not found'); return; }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
