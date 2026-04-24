@@ -61,11 +61,12 @@ function createRoom(id) {
   return {
     id,
     players: [],      // { ws, name, hand, score }
-    board: [],        // { piece, flipped, x, y } — for layout
+    board: [],
     boardEnds: null,  // { left, right } current open ends
     currentTurn: 0,
     started: false,
     passCount: 0,
+    lastPiece: null,  // { piece: [a,b] } — last piece played (for win-type detection)
   };
 }
 
@@ -112,6 +113,7 @@ function startGame(room) {
   room.boardEnds = null;
   room.started = true;
   room.passCount = 0;
+  room.lastPiece = null;
 
   // player with [6,6] starts, else [5,5], etc.
   let startPlayer = 0;
@@ -179,6 +181,7 @@ function placePiece(room, playerIndex, piece, side) {
 
   player.hand.splice(handIdx, 1);
   room.passCount = 0;
+  room.lastPiece = { piece };
   return { ok: true };
 }
 
@@ -205,20 +208,31 @@ function checkEndRound(room) {
 }
 
 function endRound(room, winnerIdx, reason) {
-  // winner scores sum of all other hands
-  let points = 0;
-  for (let i = 0; i < room.players.length; i++) {
-    if (i !== winnerIdx)
-      points += room.players[i].hand.reduce((s, p) => s + p[0] + p[1], 0);
+  // Determine win type and point value
+  let points = 1;
+  let winType = 'simple';
+
+  if (reason === 'empty' && room.lastPiece) {
+    const { piece } = room.lastPiece;
+    const isCarroca = piece[0] === piece[1];
+    const isLaeLou  = room.boardEnds != null &&
+                      room.boardEnds.left === room.boardEnds.right;
+
+    if (isCarroca && isLaeLou) { points = 5; winType = 'carroca_laeelou'; }
+    else if (isCarroca)        { points = 2; winType = 'carroca'; }
+    else if (isLaeLou)         { points = 3; winType = 'laeelou'; }
   }
+
   room.players[winnerIdx].score += points;
 
   broadcast(room, {
     type: 'roundEnd',
-    winner: room.players[winnerIdx].name,
+    winner:  room.players[winnerIdx].name,
     reason,
     points,
+    winType,
     scores: room.players.map(p => ({ name: p.name, score: p.score })),
+    hands:  room.players.map(p => ({ name: p.name, hand: [...p.hand] })),
   });
 
   room.started = false;
