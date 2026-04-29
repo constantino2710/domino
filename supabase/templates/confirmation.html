@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Confirme seu email - Dominó</title>
+  </head>
+  <body style="margin:0;padding:0;background:#0b3d2e;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#f5f5f5;">
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:#0b3d2e;padding:40px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" cellpadding="0" cellspacing="0" width="480" style="max-width:480px;background:#0a2a20;border-radius:16px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.3);overflow:hidden;">
+            <tr>
+              <td style="padding:40px 40px 24px;text-align:center;">
+                <div style="font-size:2rem;font-weight:700;color:#f5c518;letter-spacing:0.05em;margin-bottom:8px;">DOMINÓ</div>
+                <div style="color:#a8b5b0;font-size:0.9rem;">Confirme seu email para começar a jogar</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 40px 24px;color:#e0e6e3;font-size:1rem;line-height:1.5;">
+                <p style="margin:0 0 16px;">Olá!</p>
+                <p style="margin:0 0 16px;">Recebemos um pedido de cadastro com este email no Dominó. Para ativar sua conta e salvar suas estatísticas, clique no botão abaixo:</p>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding:0 40px 32px;">
+                <a href="{{ .ConfirmationURL }}"
+                   style="display:inline-block;padding:14px 32px;background:#f5c518;color:#1a1a00;font-weight:700;font-size:1rem;text-decoration:none;border-radius:8px;box-shadow:0 2px 8px rgba(245,197,24,0.3);">
+                  Confirmar email
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 40px 24px;color:#a8b5b0;font-size:0.85rem;line-height:1.5;">
+                <p style="margin:0 0 12px;">Se o botão não funcionar, copie e cole este link no navegador:</p>
+                <p style="margin:0 0 16px;word-break:break-all;color:#9fd89f;">{{ .ConfirmationURL }}</p>
+                <p style="margin:0;">Se você não criou esta conta, pode ignorar este email com segurança.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:20px 40px;border-top:1px solid rgba(255,255,255,0.08);text-align:center;color:#7a8580;font-size:0.75rem;">
+                Dominó · Jogo online
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

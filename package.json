@@ -6,12 +6,21 @@
   "scripts": {
     "start": "node server.js",
     "build": "npm install --prefix client && npm run build --prefix client",
-    "dev": "concurrently \"node server.js\" \"npm run dev --prefix client\""
+    "dev": "concurrently \"node server.js\" \"npm run dev --prefix client\"",
+    "db:link": "node scripts/supa-native.js link",
+    "db:push": "node scripts/supa-native.js db push",
+    "db:new": "node scripts/supa-native.js migration new",
+    "db:status": "node scripts/supa-native.js migration list",
+    "db:diff": "node scripts/supa-native.js db diff",
+    "db:pull": "node scripts/supa-native.js db pull"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5",
     "ws": "^8.17.0"
   },
   "devDependencies": {
-    "concurrently": "^9.0.0"
+    "concurrently": "^9.0.0",
+    "supabase": "^2.95.6"
   }
 }

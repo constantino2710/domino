@@ -9,6 +9,13 @@ client/dist/
 .env
 .env.local
 .env.*.local
+client/.env
+client/.env.local
+client/.env.*.local
+
+# supabase
+supabase/.branches
+supabase/.temp
 
 # logs
 *.log

@@ -1,9 +1,21 @@
+require('dotenv').config();
 const { WebSocketServer } = require('ws');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { createClient } = require('@supabase/supabase-js');
 
 const PORT = process.env.PORT || 8080;
+
+const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    })
+  : null;
+
+if (!supabase) {
+  console.warn('⚠ SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY não configurados — rodando sem persistência.');
+}
 
 const DIST = path.join(__dirname, 'client', 'dist');
 
@@ -19,6 +31,27 @@ const MIME = {
 
 const httpServer = http.createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+
+  // Endpoint de diagnóstico — mostra o que o servidor tem em memória.
+  if (urlPath === '/api/rooms') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify({
+      pid: process.pid,
+      uptime: Math.round(process.uptime()),
+      subscribers: roomListSubscribers.size,
+      rooms: Object.values(rooms).map(r => ({
+        id: r.id,
+        playerCount: r.players.length,
+        started: r.started,
+        players: r.players.map(p => p.name),
+      })),
+    }, null, 2));
+    return;
+  }
+
   const safePath = path.normalize(urlPath).replace(/^(\.\.(\/|\\|$))+/, '');
   const filePath = path.join(DIST, safePath === '/' || safePath === '\\' ? 'index.html' : safePath);
   const ext = path.extname(filePath).toLowerCase();
@@ -50,6 +83,37 @@ const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 // rooms: { roomId: Room }
 const rooms = {};
 
+// Salas vazias só são deletadas após esse período, pra sobreviver a reloads.
+const EMPTY_ROOM_TTL_MS = 60_000;
+
+// Sockets que querem receber updates da lista de salas (estão na tela de browse).
+const roomListSubscribers = new Set();
+
+function getRoomListPayload() {
+  return {
+    type: 'roomList',
+    rooms: Object.values(rooms).map(r => ({
+      id: r.id,
+      playerCount: r.players.length,
+      started: r.started,
+      players: r.players.map(p => p.name),
+    })),
+  };
+}
+
+function broadcastRoomList() {
+  const list = getRoomListPayload();
+  const payload = JSON.stringify(list);
+  let delivered = 0;
+  for (const sub of roomListSubscribers) {
+    if (sub.readyState === 1) {
+      sub.send(payload);
+      delivered++;
+    }
+  }
+  console.log(`[rooms] broadcast → ${delivered}/${roomListSubscribers.size} subscribers, salas=[${list.rooms.map(r => `${r.id}(${r.playerCount}/${r.started?'started':'lobby'})`).join(', ') || '∅'}]`);
+}
+
 function createDeck() {
   const deck = [];
   for (let i = 0; i <= 6; i++)
@@ -76,7 +140,26 @@ function createRoom(id) {
     started: false,
     passCount: 0,
     lastPiece: null,  // { piece: [a,b] } — last piece played (for win-type detection)
+    deleteTimer: null, // setTimeout ref para deletar sala vazia após TTL
   };
+}
+
+function scheduleRoomDeletion(room) {
+  if (room.deleteTimer) clearTimeout(room.deleteTimer);
+  room.deleteTimer = setTimeout(() => {
+    if (rooms[room.id] && rooms[room.id].players.length === 0) {
+      delete rooms[room.id];
+      console.log(`[rooms] deletada após TTL: "${room.id}"`);
+      broadcastRoomList();
+    }
+  }, EMPTY_ROOM_TTL_MS);
+}
+
+function cancelRoomDeletion(room) {
+  if (room.deleteTimer) {
+    clearTimeout(room.deleteTimer);
+    room.deleteTimer = null;
+  }
 }
 
 function broadcast(room, msg) {
@@ -139,6 +222,7 @@ function startGame(room) {
 
   broadcast(room, { type: 'started', playerCount: room.players.length });
   sendState(room);
+  broadcastRoomList();
 }
 
 function canPlay(hand, boardEnds) {
@@ -245,26 +329,157 @@ function endRound(room, winnerIdx, reason) {
   });
 
   room.started = false;
+  broadcastRoomList();
+
+  persistMatch(room, winnerIdx, reason, points, winType);
+}
+
+function persistMatch(room, winnerIdx, reason, points, winType) {
+  if (!supabase) return;
+
+  const winner = room.players[winnerIdx];
+  const playersJson = room.players.map(p => ({
+    name: p.name,
+    profile_id: p.profileId,
+    is_guest: p.isGuest,
+    final_score: p.score,
+    final_hand_sum: p.hand.reduce((s, piece) => s + piece[0] + piece[1], 0),
+  }));
+
+  supabase.from('matches').insert({
+    room_id: room.id,
+    winner_profile_id: winner.profileId,
+    winner_name: winner.name,
+    win_type: winType,
+    points,
+    reason,
+    players: playersJson,
+  }).then(({ error }) => {
+    if (error) console.error('Erro salvando partida:', error.message);
+  });
+
+  for (let i = 0; i < room.players.length; i++) {
+    const p = room.players[i];
+    if (!p.profileId) continue;
+    supabase.rpc('increment_stats', {
+      p_profile_id: p.profileId,
+      p_won: i === winnerIdx,
+    }).then(({ error }) => {
+      if (error) console.error('Erro atualizando stats:', error.message);
+    });
+  }
 }
 
 function nextTurn(room) {
   room.currentTurn = (room.currentTurn + 1) % room.players.length;
 }
 
+async function resolveIdentity(msg) {
+  // Returns { name, profileId, isGuest } or throws an Error with user message.
+  if (msg.token && supabase) {
+    console.log('[auth] validando token...');
+    const { data, error } = await supabase.auth.getUser(msg.token);
+    if (error || !data?.user) {
+      console.warn('[auth] token inválido:', error?.message || '(sem user)');
+      throw new Error('Sessão inválida. Faça login novamente.');
+    }
+    const userId = data.user.id;
+    const userEmail = data.user.email;
+    const metaUsername = data.user.user_metadata?.username;
+    console.log(`[auth] token ok — user_id=${userId} email=${userEmail} meta.username=${metaUsername || '(nenhum)'}`);
+
+    const { data: profile, error: pErr } = await supabase
+      .from('profiles')
+      .select('id, username')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (pErr) {
+      console.error('[auth] erro ao buscar profile:', pErr.message, pErr);
+      throw new Error('Erro ao buscar perfil.');
+    }
+    if (!profile) {
+      console.warn(`[auth] profile NÃO encontrado para user_id=${userId}. ` +
+        'Causa provável: migration/trigger não aplicado, ou usuário criado antes do trigger. ' +
+        'Veja o backfill no SQL Editor do Supabase.');
+      throw new Error('Perfil não encontrado.');
+    }
+
+    console.log(`[auth] profile ok — username=${profile.username}`);
+    return { name: profile.username, profileId: profile.id, isGuest: false };
+  }
+  const rawName = (msg.name || 'Convidado').slice(0, 20).trim() || 'Convidado';
+  console.log(`[auth] visitante — name=${rawName}`);
+  return { name: rawName, profileId: null, isGuest: true };
+}
+
 wss.on('connection', ws => {
   let myRoom = null;
   let myIndex = -1;
 
-  ws.on('message', raw => {
+  ws.on('message', async raw => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
-    if (msg.type === 'join') {
-      const roomId = msg.room || 'default';
-      const name = (msg.name || 'Jogador').slice(0, 20);
+    if (msg.type === 'subscribeRooms') {
+      roomListSubscribers.add(ws);
+      const payload = getRoomListPayload();
+      sendTo(ws, payload);
+      console.log(`[rooms] novo subscriber (total=${roomListSubscribers.size}). Enviando ${payload.rooms.length} sala(s).`);
+      return;
+    }
 
-      if (!rooms[roomId]) rooms[roomId] = createRoom(roomId);
+    if (msg.type === 'join') {
+      const roomId = (msg.room || 'default').slice(0, 30).trim() || 'default';
+
+      let identity;
+      try {
+        identity = await resolveIdentity(msg);
+      } catch (e) {
+        sendTo(ws, { type: 'error', message: e.message });
+        return;
+      }
+
+      const isNewRoom = !rooms[roomId];
+      if (isNewRoom) {
+        rooms[roomId] = createRoom(roomId);
+        console.log(`[rooms] criada: "${roomId}" por ${identity.name}`);
+      }
       const room = rooms[roomId];
+      // Alguém está entrando — cancela qualquer agendamento de deleção pendente.
+      cancelRoomDeletion(room);
+
+      // Reconexão graciosa: se já existe um jogador com a mesma identidade
+      // (token/profileId, ou mesmo nome pra visitantes), substitui o WS antigo
+      // em vez de rejeitar. Cobre o caso de reload (Ctrl+Shift+R) onde o
+      // socket antigo ainda não foi limpo.
+      const existingIdx = room.players.findIndex(p =>
+        (identity.profileId && p.profileId === identity.profileId) ||
+        (!identity.profileId && p.name === identity.name)
+      );
+
+      if (existingIdx !== -1) {
+        const existing = room.players[existingIdx];
+        console.log(`[rooms] reconexão de "${identity.name}" em "${roomId}" — substituindo socket antigo`);
+        // Fecha o socket zumbi pra liberar recursos (sem disparar nosso close handler com efeito colateral)
+        if (existing.ws !== ws && existing.ws.readyState === 1) {
+          try { existing.ws.close(); } catch {}
+        }
+        existing.ws = ws;
+        roomListSubscribers.delete(ws);
+        myRoom = room;
+        myIndex = existingIdx;
+        sendTo(ws, { type: 'joined', roomId, playerIndex: myIndex, name: identity.name });
+        // Reenvia estado completo (lobby + state se já em jogo)
+        broadcast(room, {
+          type: 'lobby',
+          players: room.players.map(p => p.name),
+          count: room.players.length,
+        });
+        if (room.started) sendTo(ws, buildStateFor(room, myIndex));
+        broadcastRoomList();
+        return;
+      }
 
       if (room.started) {
         sendTo(ws, { type: 'error', message: 'Partida já em andamento' });
@@ -274,17 +489,32 @@ wss.on('connection', ws => {
         sendTo(ws, { type: 'error', message: 'Sala cheia (máx 4 jogadores)' });
         return;
       }
+      if (room.players.some(p => p.name === identity.name)) {
+        sendTo(ws, { type: 'error', message: 'Já existe um jogador com esse nome nesta sala' });
+        return;
+      }
+
+      // Quem entra numa sala não recebe mais updates da lista global.
+      roomListSubscribers.delete(ws);
 
       myRoom = room;
       myIndex = room.players.length;
-      room.players.push({ ws, name, hand: [], score: 0 });
+      room.players.push({
+        ws,
+        name: identity.name,
+        profileId: identity.profileId,
+        isGuest: identity.isGuest,
+        hand: [],
+        score: 0,
+      });
 
-      sendTo(ws, { type: 'joined', roomId, playerIndex: myIndex, name });
+      sendTo(ws, { type: 'joined', roomId, playerIndex: myIndex, name: identity.name });
       broadcast(room, {
         type: 'lobby',
         players: room.players.map(p => p.name),
         count: room.players.length,
       });
+      broadcastRoomList();
     }
 
     else if (msg.type === 'start') {
@@ -339,13 +569,27 @@ wss.on('connection', ws => {
   });
 
   ws.on('close', () => {
+    roomListSubscribers.delete(ws);
     if (!myRoom) return;
+
+    // Se o slot deste jogador já foi assumido por outra WS (reconexão graciosa),
+    // não removemos — o close é do socket "zumbi" antigo.
+    const slot = myRoom.players[myIndex];
+    if (!slot || slot.ws !== ws) {
+      console.log(`[rooms] close do socket antigo de "${myRoom.id}" ignorado (já reconectado)`);
+      return;
+    }
+
     myRoom.players.splice(myIndex, 1);
     // re-index remaining
     for (let i = 0; i < myRoom.players.length; i++)
       myRoom.players[i].ws._myIndex = i;
     if (myRoom.players.length === 0) {
-      delete rooms[myRoom.id];
+      // Não deleta na hora — agenda. Se ninguém voltar em EMPTY_ROOM_TTL_MS, deleta.
+      console.log(`[rooms] "${myRoom.id}" ficou vazia, deletando em ${EMPTY_ROOM_TTL_MS/1000}s`);
+      scheduleRoomDeletion(myRoom);
+      // Se a partida estava em andamento, encerra (não faz sentido reiniciar do nada)
+      if (myRoom.started) myRoom.started = false;
     } else {
       broadcast(myRoom, {
         type: 'playerLeft',
@@ -356,9 +600,11 @@ wss.on('connection', ws => {
         broadcast(myRoom, { type: 'error', message: 'Um jogador saiu. Partida encerrada.' });
       }
     }
+    broadcastRoomList();
   });
 });
 
 httpServer.listen(PORT, () => {
   console.log(`Servidor rodando em http://localhost:${PORT}`);
+  console.log(`PID=${process.pid} (se aparecerem dois PIDs nos logs, há mais de uma instância)`);
 });

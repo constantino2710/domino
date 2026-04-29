@@ -1,0 +1,14 @@
+# Imagem para rodar a Supabase CLI (migrations) sem precisar instalá-la local
+# nem fazer `supabase login` toda vez. Autenticação vem via SUPABASE_ACCESS_TOKEN
+# e SUPABASE_DB_PASSWORD (lidos do .env pelo docker-compose).
+FROM node:20-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g supabase@latest
+
+WORKDIR /workspace
+
+ENTRYPOINT ["supabase"]

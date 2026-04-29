@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npm install *)",
       "Bash(npm run *)",
-      "Bash(timeout 3 node server.js)"
+      "Bash(timeout 3 node server.js)",
+      "Bash(docker version *)"
     ]
   }
 }
